@@ -1,0 +1,30 @@
+#
+# Regex Expression recommendations:
+# - Use ^ at the start
+# - Use $ at the end
+# - Be carefull of potential arguments in URI's
+#
+
+[get]
+allowed = false
+regex = ''
+
+[head]
+allowed = false
+regex = ''
+
+[post]
+allowed = false
+regex = ''
+
+[put]
+allowed = false
+regex = ''
+
+[patch]
+allowed = false
+regex = ''
+
+[delete]
+allowed = false
+regex = ''
