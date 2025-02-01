@@ -48,9 +48,9 @@ pub struct Proxy {
 }
 
 /// Check if the regex strings in the config are valid
-/// 
+///
 /// # Errors
-/// 
+///
 /// If an invalid pattern is found in the config, an error is returned.
 /// An error is also returned if the pattern is valid, but would
 /// produce a regex that is bigger than the size limit configured in the regex library.
