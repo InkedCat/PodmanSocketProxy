@@ -7,17 +7,17 @@ allowed = true
 regex = '^.*$'
 
 [post]
-allowed = false
-regex = '^.*$'
+allowed = true
+regex = '^/v1.47/session$'
 
 [put]
 allowed = false
-regex = '^.*$'
+regex = '^$'
 
 [patch]
 allowed = false
-regex = '^.*$'
+regex = '^$'
 
 [delete]
 allowed = false
-regex = '^.*$'
+regex = '^$'
