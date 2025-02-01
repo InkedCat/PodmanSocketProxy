@@ -1,30 +1,62 @@
 mod cli;
 mod config;
-mod errors;
+mod responses;
 
 use anyhow::Context;
 use config::Config;
-use errors::connect_podman_error::ConnectPodmanError;
-use errors::open_protected_error::OpenProtectedError;
-use errors::read_complete_error::ReadCompleteError;
 use httparse::Request;
-use std::result::Result::Ok;
+use responses::{BAD_REQUEST, FORBIDDEN, NOT_ALLOWED};
+use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt, BufReader};
+use thiserror::Error;
+use tokio::fs;
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Semaphore;
-
-use std::{fs, os::unix::fs::FileTypeExt};
+use tokio::sync::mpsc::Sender;
+use tokio::sync::{mpsc, Semaphore};
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 10000;
 const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024; // 10MB
+
+//
+// Errors
+//
+#[derive(Error, Debug)]
+pub enum ConnectPodmanError {
+    #[error("failed to connect to Podman socket")]
+    ConnectError(#[from] std::io::Error),
+    #[error("no socket found at path")]
+    NoSocketFound(),
+}
+
+#[derive(Error, Debug)]
+pub enum OpenProtectedError {
+    #[error("failed to open socket")]
+    SocketError(#[from] std::io::Error),
+    #[error("socket file already exists")]
+    SocketExists(),
+}
+
+#[derive(Error, Debug)]
+pub enum ReadCompleteError {
+    #[error("failed to read from stream")]
+    ReadError(#[from] std::io::Error),
+    #[error("no data read from stream")]
+    NoData(),
+    #[error("failed to parse HTTP request")]
+    ParseError(#[from] httparse::Error),
+    #[error("buffer capacity exceeded")]
+    ExceededMaxSize(),
+}
 
 enum FilterResult {
     Allowed,
     MethodNotAllowed,
     Forbidden,
-    BadRequest
+    BadRequest,
 }
+
 //
 // Clients logic
 //
@@ -33,6 +65,7 @@ fn is_action_allowed(req: &Request, config: &Config) -> FilterResult {
         Some(method) => method,
         None => return FilterResult::MethodNotAllowed,
     };
+
     let path = match req.path {
         Some(path) => path,
         None => return FilterResult::Forbidden,
@@ -64,25 +97,23 @@ fn is_action_allowed(req: &Request, config: &Config) -> FilterResult {
     return FilterResult::Forbidden;
 }
 
-async fn send_request(
-    req: &Vec<u8>,
-    res: &mut Vec<u8>,
-    buf_reader: &mut BufReader<UnixStream>,
-) -> io::Result<()> {
-    buf_reader.write_all(req).await?;
-    // TODO: allow big responses
-    let _size_left = buf_reader.read_buf(res).await?;
+fn headers_contains_upgrade(headers: &[httparse::Header]) -> bool {
+    for header in headers {
+        if header.name.to_lowercase() == "connection" {
+            return true;
+        }
+    }
 
-    Ok(())
+    false
 }
 
-async fn read_until_complete(
-    buffer_reader: &mut BufReader<UnixStream>,
+async fn read_request(
+    buffer_reader: &mut BufReader<OwnedReadHalf>,
 ) -> Result<Vec<u8>, ReadCompleteError> {
-    let mut buffer: Vec<u8> = Vec::with_capacity(10 * 1024);
+    let mut buffer: Vec<u8> = Vec::with_capacity(1024 * 1024);
     let mut is_valid = false;
 
-    let mut temp_buffer: Vec<u8> = Vec::with_capacity(10 * 1024);
+    let mut temp_buffer: Vec<u8> = Vec::with_capacity(1024 * 1024);
     while !is_valid {
         let size = buffer_reader.read_buf(&mut temp_buffer).await?;
         if size == 0 {
@@ -90,7 +121,7 @@ async fn read_until_complete(
         }
 
         if buffer.len() + size > MAX_REQUEST_SIZE {
-            return Err(ReadCompleteError::ExceededMaxSize(buffer.capacity()));
+            return Err(ReadCompleteError::ExceededMaxSize());
         }
 
         buffer.append(&mut temp_buffer);
@@ -103,97 +134,81 @@ async fn read_until_complete(
     Ok(buffer)
 }
 
-async fn write_response(
-    buffer_reader: &mut BufReader<UnixStream>,
-    response: &[u8],
-) -> io::Result<()> {
-    buffer_reader.write_all(response).await?;
-    buffer_reader.flush().await?;
-    Ok(())
+struct ClientAnswer {
+    buffer: Vec<u8>,
+    close: bool,
 }
 
-async fn write_bad_request(buffer_reader: &mut BufReader<UnixStream>) -> io::Result<()> {
-    let bad_request = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n400 bad request";
-    write_response(buffer_reader, bad_request.as_bytes()).await?;
-    Ok(())
+fn close_response(message: &str) -> ClientAnswer {
+    ClientAnswer {
+        buffer: message.as_bytes().to_vec(),
+        close: true,
+    }
 }
 
-async fn write_method_not_allowed(buffer_reader: &mut BufReader<UnixStream>) -> io::Result<()> {
-    let forbidden = "HTTP/1.1 405 Method Not Allowed\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\n405 method not allowed\n";
-    write_response(buffer_reader, forbidden.as_bytes()).await?;
-    Ok(())
-}
-
-async fn write_forbidden(buffer_reader: &mut BufReader<UnixStream>) -> io::Result<()> {
-    let forbidden = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\n\r\nblocked by proxy\n";
-    write_response(buffer_reader, forbidden.as_bytes()).await?;
-    Ok(())
+fn request_response(buffer: Vec<u8>) -> ClientAnswer {
+    ClientAnswer {
+        buffer,
+        close: false,
+    }
 }
 
 // Warning - Limitation
-// No support for HTTP/2 Portocol Switching
-// TODO: Implement HTTP/2 Protocol Switching
+// No support for HTTP/2 Portocol Switching, too risky to implement
 async fn handle_client(
-    buf_reader: &mut BufReader<UnixStream>,
-    podman_path: String,
+    protected_read: OwnedReadHalf,
+    mut podman_write: OwnedWriteHalf,
+    writer_channel: Sender<ClientAnswer>,
     config: Config,
 ) -> anyhow::Result<()> {
-    let podman_sock = connect_podman_socket(&podman_path)
-        .await
-        .with_context(|| format!("Failed to connect to Podman socket at {}", podman_path))?;
-    let mut podman_buf_reader = BufReader::new(podman_sock);
+    let mut protected_reader = BufReader::new(protected_read);
 
-    let mut end = false;
-
-    while !end {
-        let request_buffer = match read_until_complete(buf_reader).await {
+    loop {
+        let request_buffer = match read_request(&mut protected_reader).await {
             Ok(buffer) => buffer,
-            Err(e) => {
-                match &e {
-                    ReadCompleteError::ReadError(_e) => {}
-                    ReadCompleteError::NoData() => {}
-                    _ => write_bad_request(buf_reader).await?,
-                }
-
-                end = true;
-                continue;
+            Err(ReadCompleteError::NoData()) => break,
+            Err(ReadCompleteError::ReadError(_)) => break,
+            Err(_) => {
+                writer_channel.send(close_response(BAD_REQUEST)).await?;
+                break;
             }
         };
+
+        println!("Request: {:?}", String::from_utf8_lossy(&request_buffer));
 
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
 
         let result = req.parse(&request_buffer)?;
-
         if result.is_partial() {
-            end = true;
-            continue;
-        } 
-        
+            writer_channel.send(close_response(BAD_REQUEST)).await?;
+            break;
+        }
+
+        if headers_contains_upgrade(req.headers) {
+            writer_channel.send(close_response(FORBIDDEN)).await?;
+            break;
+        }
+
         match is_action_allowed(&req, &config) {
             FilterResult::Allowed => {
-                let mut response_buf = Vec::with_capacity(10 * 1024);
-                let _size_left =
-                    send_request(&request_buffer, &mut response_buf, &mut podman_buf_reader).await?;
-    
-                write_response(buf_reader, &response_buf).await?;
-            },
+                podman_write.write_all(&request_buffer).await?;
+            }
             FilterResult::MethodNotAllowed => {
-                write_method_not_allowed(buf_reader).await?;
-                end = true;
-            },
+                writer_channel.send(close_response(NOT_ALLOWED)).await?;
+                break;
+            }
             FilterResult::Forbidden => {
-                write_forbidden(buf_reader).await?;
-                end = true;
-            },
+                writer_channel.send(close_response(FORBIDDEN)).await?;
+                break;
+            }
             FilterResult::BadRequest => {
-                write_bad_request(buf_reader).await?;
-                end = true;
+                writer_channel.send(close_response(BAD_REQUEST)).await?;
+                break;
             }
         }
     }
 
-    podman_buf_reader.shutdown().await?;
     Ok(())
 }
 
@@ -201,7 +216,9 @@ async fn handle_client(
 // Sockets
 //
 async fn connect_podman_socket(podman_path: &String) -> Result<UnixStream, ConnectPodmanError> {
-    if fs::exists(podman_path)? && fs::metadata(podman_path)?.file_type().is_socket() {
+    if fs::try_exists(podman_path).await?
+        && fs::metadata(podman_path).await?.file_type().is_socket()
+    {
         let podman_sock = UnixStream::connect(podman_path).await?;
         return Ok(podman_sock);
     }
@@ -213,17 +230,18 @@ async fn open_protected_socket(
     socket_path: &String,
     replace: bool,
 ) -> Result<UnixListener, OpenProtectedError> {
-    if fs::metadata(socket_path).is_ok() {
+    if fs::metadata(socket_path).await.is_ok() {
         if !replace {
             return Err(OpenProtectedError::SocketExists());
         }
 
-        fs::remove_file(socket_path)?
+        fs::remove_file(socket_path).await?
     }
 
     let protected_socket: UnixListener = UnixListener::bind(socket_path)?;
     Ok(protected_socket)
 }
+
 //
 // Main entrypoint
 //
@@ -243,24 +261,76 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         match listener.accept().await {
-            Ok((socket, _addr)) => {
+            Ok((stream, _addr)) => {
                 let permit = semaphore.clone().acquire_owned().await?;
 
                 let podman_path = args.podman_path.clone();
                 let config = config.clone();
-                
-                let mut buf_reader = BufReader::new(socket);
+
+                let podman_sock = connect_podman_socket(&podman_path).await.with_context(|| {
+                    format!("Failed to connect to Podman socket at {}", podman_path)
+                })?;
+
+                let (stream_read, mut stream_write) = stream.into_split();
+                let (podman_read, podman_write) = podman_sock.into_split();
+
+                let (tx, mut rx) = mpsc::channel(1024);
+                let handler_tx = tx.clone();
+                let receiver_tx = tx.clone();
+
                 tokio::spawn(async move {
-                    if let Err(e) = handle_client(&mut buf_reader, podman_path, config).await {
-                        eprintln!("Error handling client: {}", e);
+                    if let Err(e) =
+                        handle_client(stream_read, podman_write, handler_tx, config).await
+                    {
+                        eprintln!("Error occured while handling a client: {}", e);
                     }
 
-                    if let Err(e) = buf_reader.shutdown().await {
-                        eprintln!("Error shutting down client socket: {}", e);
-                    }
-
-                    drop(buf_reader);
                     drop(permit);
+                });
+
+                tokio::spawn(async move {
+                    while let Some(message) = rx.recv().await {
+                        match stream_write.write_all(&message.buffer).await {
+                            Ok(_) => {
+                                if message.close {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error writing to a client: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                });
+
+                tokio::spawn(async move {
+                    let mut podman_buffer_reader = BufReader::new(podman_read);
+
+                    let mut response_buffer: Vec<u8> = Vec::with_capacity(1024 * 1024);
+                    loop {
+                        let size = match podman_buffer_reader.read_buf(&mut response_buffer).await {
+                            Ok(size) => size,
+                            Err(e) => {
+                                eprintln!("Error reading from the Podman socket: {}", e);
+                                break;
+                            }
+                        };
+
+                        if size == 0 {
+                            break;
+                        }
+
+                        if let Err(e) = receiver_tx
+                            .send(request_response(response_buffer.clone()))
+                            .await
+                        {
+                            eprintln!("Error sending response to a client: {}", e);
+                            break;
+                        }
+
+                        response_buffer.clear();
+                    }
                 });
             }
             Err(err) => {
