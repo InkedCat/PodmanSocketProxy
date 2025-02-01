@@ -1,0 +1,23 @@
+[get]
+allowed = true
+regex = '^/v1\..{1,2}/(version|containers/.*|events.*)$'
+
+[head]
+allowed = true
+regex = '^.*$'
+
+[post]
+allowed = true
+regex = '^/v1.47/session$'
+
+[put]
+allowed = false
+regex = '^$'
+
+[patch]
+allowed = false
+regex = '^$'
+
+[delete]
+allowed = false
+regex = '^$'
