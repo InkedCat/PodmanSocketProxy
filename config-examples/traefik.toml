@@ -7,8 +7,8 @@ allowed = true
 regex = '^.*$'
 
 [post]
-allowed = true
-regex = '^/v1.47/session$'
+allowed = false
+regex = '^.*$'
 
 [put]
 allowed = false
