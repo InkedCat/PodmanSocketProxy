@@ -1,12 +1,10 @@
 use std::os::unix::fs::FileTypeExt;
 
-use crate::cli;
 use crate::errors::ConnectPodmanError;
 use crate::errors::OpenSocketError;
 
-use cli::{TcpArgs, UnixArgs};
 use tokio::fs;
-use tokio::net::{TcpListener, UnixListener, UnixStream};
+use tokio::net::{UnixListener, UnixStream};
 
 pub async fn connect_podman_socket(podman_path: &String) -> Result<UnixStream, ConnectPodmanError> {
     if fs::try_exists(podman_path).await?
@@ -19,20 +17,18 @@ pub async fn connect_podman_socket(podman_path: &String) -> Result<UnixStream, C
     Err(ConnectPodmanError::NoSocketFound())
 }
 
-pub async fn open_protected_socket(args: &UnixArgs) -> Result<UnixListener, OpenSocketError> {
-    if fs::metadata(&args.socket_path).await.is_ok() {
-        if !args.replace {
+pub async fn open_protected_socket(
+    socket_path: &String,
+    replace: bool,
+) -> Result<UnixListener, OpenSocketError> {
+    if fs::metadata(socket_path).await.is_ok() {
+        if !replace {
             return Err(OpenSocketError::SocketExists());
         }
 
-        fs::remove_file(&args.socket_path).await?
+        fs::remove_file(socket_path).await?
     }
 
-    let protected_socket: UnixListener = UnixListener::bind(&args.socket_path)?;
-    Ok(protected_socket)
-}
-
-pub async fn open_protected_stream(args: &TcpArgs) -> Result<TcpListener, OpenSocketError> {
-    let protected_socket = TcpListener::bind(format!("{}:{}", args.ip, args.port)).await?;
+    let protected_socket: UnixListener = UnixListener::bind(socket_path)?;
     Ok(protected_socket)
 }

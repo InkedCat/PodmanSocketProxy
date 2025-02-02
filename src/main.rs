@@ -8,9 +8,9 @@ mod responses;
 use crate::client::handle_client;
 use crate::responses::request_response;
 use anyhow::Context;
-use proxy::connect_podman_socket;
+use proxy::{connect_podman_socket, open_protected_socket};
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 
 use tokio::sync::{mpsc, Semaphore};
 
