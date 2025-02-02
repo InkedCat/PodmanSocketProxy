@@ -1,7 +1,7 @@
 use clap::Parser;
 
 const DEFAULT_PODMAN_PATH: &str = "/run/podman.sock";
-const DEFAULT_SOCKET_PATH: &str = "/tmp/safe-podman.sock";
+const DEFAULT_SOCKET_PATH: &str = "/var/run/safe-podman.sock";
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
