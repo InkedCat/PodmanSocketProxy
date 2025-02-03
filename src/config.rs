@@ -33,6 +33,11 @@ pub enum ConfigParsingError {
 
 #[derive(Deserialize, Clone)]
 pub struct Config {
+    pub filters: Filters,
+}
+
+#[derive(Deserialize, Clone)]
+pub struct Filters {
     pub get: Proxy,
     pub head: Proxy,
     pub post: Proxy,
@@ -54,16 +59,16 @@ pub struct Proxy {
 /// If an invalid pattern is found in the config, an error is returned.
 /// An error is also returned if the pattern is valid, but would
 /// produce a regex that is bigger than the size limit configured in the regex library.
-fn check_config_regex(config: &Config) -> Result<(), HTTPRegexParseError> {
+fn check_config_filters(filters: &Filters) -> Result<(), HTTPRegexParseError> {
     let methods = vec!["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
     for method in methods {
         let proxy = match method {
-            "GET" => &config.get,
-            "HEAD" => &config.head,
-            "POST" => &config.post,
-            "PUT" => &config.put,
-            "PATCH" => &config.patch,
-            "DELETE" => &config.delete,
+            "GET" => &filters.get,
+            "HEAD" => &filters.head,
+            "POST" => &filters.post,
+            "PUT" => &filters.put,
+            "PATCH" => &filters.patch,
+            "DELETE" => &filters.delete,
             _ => return Ok(()),
         };
 
@@ -82,9 +87,9 @@ fn check_config_regex(config: &Config) -> Result<(), HTTPRegexParseError> {
 
 pub fn get_config(path: &str) -> Result<Config, ConfigParsingError> {
     let config_file = fs::read_to_string(path)?;
-    let config = toml::from_str(&config_file)?;
+    let config: Config = toml::from_str(&config_file)?;
 
-    check_config_regex(&config)?;
+    check_config_filters(&config.filters)?;
 
     Ok(config)
 }

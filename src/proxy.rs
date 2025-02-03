@@ -1,34 +1,105 @@
-use std::os::unix::fs::FileTypeExt;
+pub mod client;
+pub mod tcp;
+pub mod unix;
 
-use crate::errors::ConnectPodmanError;
-use crate::errors::OpenSocketError;
+use tokio::io::{self, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::net;
 
-use tokio::fs;
-use tokio::net::{UnixListener, UnixStream};
-
-pub async fn connect_podman_socket(podman_path: &String) -> Result<UnixStream, ConnectPodmanError> {
-    if fs::try_exists(podman_path).await?
-        && fs::metadata(podman_path).await?.file_type().is_socket()
-    {
-        let podman_sock = UnixStream::connect(podman_path).await?;
-        return Ok(podman_sock);
-    }
-
-    Err(ConnectPodmanError::NoSocketFound())
+pub enum ProxyListener {
+    Inet(net::TcpListener),
+    Unix(net::UnixListener),
 }
 
-pub async fn open_protected_socket(
-    socket_path: &String,
-    replace: bool,
-) -> Result<UnixListener, OpenSocketError> {
-    if fs::metadata(socket_path).await.is_ok() {
-        if !replace {
-            return Err(OpenSocketError::SocketExists());
-        }
-
-        fs::remove_file(socket_path).await?
+impl From<net::TcpListener> for ProxyListener {
+    fn from(listener: net::TcpListener) -> Self {
+        ProxyListener::Inet(listener)
     }
+}
 
-    let protected_socket: UnixListener = UnixListener::bind(socket_path)?;
-    Ok(protected_socket)
+impl From<net::UnixListener> for ProxyListener {
+    fn from(listener: net::UnixListener) -> Self {
+        ProxyListener::Unix(listener)
+    }
+}
+
+impl ProxyListener {
+    pub async fn accept(&self) -> io::Result<ProxyStream> {
+        match self {
+            ProxyListener::Inet(listener) => {
+                let (stream, _) = listener.accept().await?;
+                Ok(ProxyStream::Inet(stream))
+            }
+            ProxyListener::Unix(listener) => {
+                let (stream, _) = listener.accept().await?;
+                Ok(ProxyStream::Unix(stream))
+            }
+        }
+    }
+}
+
+pub enum ProxyStream {
+    Inet(net::TcpStream),
+    Unix(net::UnixStream),
+}
+
+impl From<net::TcpStream> for ProxyStream {
+    fn from(stream: net::TcpStream) -> Self {
+        ProxyStream::Inet(stream)
+    }
+}
+
+impl From<net::UnixStream> for ProxyStream {
+    fn from(stream: net::UnixStream) -> Self {
+        ProxyStream::Unix(stream)
+    }
+}
+
+impl ProxyStream {
+    pub fn split(self) -> (ProxyBufferedRead, ProxyWriteHalf) {
+        match self {
+            ProxyStream::Inet(stream) => {
+                let (read, write) = stream.into_split();
+                (
+                    ProxyBufferedRead::Inet(BufReader::new(read)),
+                    ProxyWriteHalf::Inet(write),
+                )
+            }
+            ProxyStream::Unix(stream) => {
+                let (read, write) = stream.into_split();
+                (
+                    ProxyBufferedRead::Unix(BufReader::new(read)),
+                    ProxyWriteHalf::Unix(write),
+                )
+            }
+        }
+    }
+}
+
+pub enum ProxyBufferedRead {
+    Inet(tokio::io::BufReader<net::tcp::OwnedReadHalf>),
+    Unix(tokio::io::BufReader<net::unix::OwnedReadHalf>),
+}
+
+impl ProxyBufferedRead {
+    pub async fn read(&mut self, buf: &mut Vec<u8>) -> io::Result<usize> {
+        match self {
+            ProxyBufferedRead::Inet(read) => read.read_buf(buf).await,
+            ProxyBufferedRead::Unix(read) => read.read_buf(buf).await,
+        }
+    }
+}
+
+pub enum ProxyWriteHalf {
+    Inet(net::tcp::OwnedWriteHalf),
+    Unix(net::unix::OwnedWriteHalf),
+}
+
+impl ProxyWriteHalf {
+    pub async fn write(&mut self, buf: &[u8]) -> io::Result<()> {
+        match self {
+            ProxyWriteHalf::Inet(write) => write.write_all(buf).await,
+            ProxyWriteHalf::Unix(write) => write.write_all(buf).await,
+        }
+    }
 }

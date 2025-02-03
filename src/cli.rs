@@ -1,41 +1,58 @@
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
-const DEFAULT_PODMAN_PATH: &str = "/run/podman.sock";
+const DEFAULT_PODMAN_PATH: &str = "/run/docker.sock";
 const DEFAULT_SOCKET_PATH: &str = "/var/run/safe-podman.sock";
-
-#[derive(Parser, Debug)]
-#[command(version, about, long_about = None)]
+const DEFAULT_SOCKET_IP: &str = "127.0.0.1";
+const DEFAULT_SOCKET_PORT: u16 = 8787;
 
 /// CLI arguments
-pub struct Args {
+#[derive(Parser, Debug)]
+#[command(name = "Podman Socket Proxy")]
+#[command(version, about, long_about = None)]
+pub struct Cli {
     /// The full path to the Podman socket
     #[arg(short, long, default_value_t = DEFAULT_PODMAN_PATH.to_string())]
     pub podman_path: String,
 
+    /// The path to the TOML configuration file
+    #[arg(short, long, default_value_t = String::from("./config.toml"))]
+    pub config_path: String,
+
+    #[command(subcommand)]
+    pub proxy: Proxy,
+}
+#[derive(Subcommand, Debug)]
+pub enum Proxy {
+    /// Start the proxy as a Unix Socket
+    Unix(UnixProxyArgs),
+
+    /// Start the proxy as a TCP Socket
+    Inet(InetProxyArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct UnixProxyArgs {
     /// The full path of the protected socket
     #[arg(short, long, default_value_t = DEFAULT_SOCKET_PATH.to_string())]
     pub socket_path: String,
 
-    /// Replace the existing socket if it exists
-    /// This will remove the existing socket file if it exists
-    /// and create a new one
-    /// If the socket does not exist, it will be created
-    /// If this flag is not set and the socket exists, the program will exit
-    /// with an error
+    /// Replace the socket file if it already exists
     #[arg(short, long, default_value_t = false)]
     pub replace: bool,
+}
 
-    /// The path to the configuration file
-    /// This file should be in TOML format
-    /// The default value is "./config.toml"
-    /// If the file does not exist, the program will exit with an error
-    /// If the file is not valid TOML, the program will exit with an error
-    /// If the file is valid TOML, but the regex patterns are invalid, the program will exit with an error
-    #[arg(short, long, default_value_t = String::from("./config.toml"))]
-    pub config_path: String,
+#[derive(Args, Debug)]
+pub struct InetProxyArgs {
+    /// The IP address the protected socket will listen on
+    #[arg(short, long, default_value_t = DEFAULT_SOCKET_IP.to_string())]
+    pub ip: String,
+
+    /// The port the protected socket will listen on
+    #[arg(short, long, default_value_t = DEFAULT_SOCKET_PORT, value_parser = clap::value_parser!(u16).range(1..65535))]
+    pub port: u16,
 }
 
 /// Parse the command line arguments
-pub fn get_args() -> Args {
-    Args::parse()
+pub fn get_args() -> Cli {
+    Cli::parse()
 }

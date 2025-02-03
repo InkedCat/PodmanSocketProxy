@@ -1,20 +1,47 @@
 mod cli;
-mod client;
 mod config;
 mod errors;
+mod filter;
 mod proxy;
 mod responses;
 
-use crate::client::handle_client;
 use crate::responses::request_response;
 use anyhow::Context;
-use proxy::{connect_podman_socket, open_protected_socket};
+use errors::ConnectPodmanError;
+use proxy::client::handle_client;
+use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
-use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::fs;
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::net::UnixStream;
 
 use tokio::sync::{mpsc, Semaphore};
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 10000;
+
+struct PodmanSocketConnector {
+    podman_path: String,
+}
+
+impl PodmanSocketConnector {
+    pub fn new(podman_path: String) -> Self {
+        PodmanSocketConnector { podman_path }
+    }
+
+    pub async fn connect(&self) -> Result<UnixStream, ConnectPodmanError> {
+        if fs::try_exists(&self.podman_path).await?
+            && fs::metadata(&self.podman_path)
+                .await?
+                .file_type()
+                .is_socket()
+        {
+            let podman_sock = UnixStream::connect(&self.podman_path).await?;
+            return Ok(podman_sock);
+        }
+
+        Err(ConnectPodmanError::NoSocketFound(self.podman_path.clone()))
+    }
+}
 
 //
 // Main entrypoint
@@ -26,26 +53,36 @@ async fn main() -> anyhow::Result<()> {
     let config = config::get_config(&args.config_path)
         .with_context(|| format!("Failed to parse config file at {}", &args.config_path))?;
 
-    let listener = open_protected_socket(&args.socket_path, args.replace)
-        .await
-        .with_context(|| format!("Failed to open protected socket at {}", &args.socket_path))?;
+    let listener = match args.proxy {
+        cli::Proxy::Inet(args) => {
+            let inet_socket = proxy::tcp::open_inet_socket(&args).await?;
+
+            println!("Listening on: {}:{}", args.ip, args.port);
+            proxy::ProxyListener::Inet(inet_socket)
+        }
+        cli::Proxy::Unix(args) => {
+            let unix_socket = proxy::unix::open_unix_socket(&args).await?;
+
+            println!("Listening on: {:?}", args.socket_path);
+            proxy::ProxyListener::Unix(unix_socket)
+        }
+    };
 
     let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
+    let podman_connector = PodmanSocketConnector::new(args.podman_path.clone());
+    let filters_handler = filter::FiltersHandler::new(config.filters);
 
     loop {
         match listener.accept().await {
-            Ok((stream, _addr)) => {
+            Ok(stream) => {
                 let permit = semaphore.clone().acquire_owned().await?;
 
-                let podman_path = args.podman_path.clone();
-                let config = config.clone();
+                let filters_handler = filters_handler.clone();
 
-                let podman_sock = connect_podman_socket(&podman_path).await.with_context(|| {
-                    format!("Failed to connect to Podman socket at {}", podman_path)
-                })?;
-
-                let (stream_read, mut stream_write) = stream.into_split();
+                let podman_sock = podman_connector.connect().await?;
                 let (podman_read, podman_write) = podman_sock.into_split();
+
+                let (stream_read, mut stream_write) = stream.split();
 
                 let (tx, mut rx) = mpsc::channel(1024);
                 let handler_tx = tx.clone();
@@ -53,7 +90,7 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_client(stream_read, podman_write, handler_tx, config).await
+                        handle_client(stream_read, podman_write, handler_tx, filters_handler).await
                     {
                         eprintln!("Error occured while handling a client: {}", e);
                     }
@@ -63,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
 
                 tokio::spawn(async move {
                     while let Some(message) = rx.recv().await {
-                        match stream_write.write_all(&message.buffer).await {
+                        match stream_write.write(&message.buffer).await {
                             Ok(_) => {
                                 if message.close {
                                     break;
