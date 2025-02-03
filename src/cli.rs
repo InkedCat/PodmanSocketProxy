@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 
 const DEFAULT_PODMAN_PATH: &str = "/run/podman/podman.sock";
 const DEFAULT_SOCKET_PATH: &str = "/var/run/safe-podman.sock";
-const DEFAULT_SOCKET_IP: &str = "127.0.0.1";
+const DEFAULT_SOCKET_IP: &str = "localhost";
 const DEFAULT_SOCKET_PORT: u16 = 8787;
 
 /// CLI arguments
