@@ -52,38 +52,41 @@ pub async fn handle_client(
             Err(ReadCompleteError::ReadError(_)) => break,
             Err(_) => {
                 writer_channel.send(close_response(BAD_REQUEST)).await?;
-                debug!("Bad request");
+                log::debug!("Bad request");
                 break;
             }
         };
 
-        debug!("Received request: {:?}", String::from_utf8_lossy(&request_buffer));
+        log::debug!(
+            "Received request: {:?}",
+            String::from_utf8_lossy(&request_buffer)
+        );
         let mut headers = [httparse::EMPTY_HEADER; 64];
         let mut req = httparse::Request::new(&mut headers);
 
         let result = req.parse(&request_buffer)?;
         if result.is_partial() {
             writer_channel.send(close_response(BAD_REQUEST)).await?;
-            debug!("Bad request");
+            log::debug!("Bad request");
             break;
         }
 
         match filters_handler.is_action_allowed(&req, &req.headers) {
             FilterResult::Allowed => {
                 podman_write.write_all(&request_buffer).await?;
-                debug!("Request sent to Podman");
+                log::debug!("Request sent to Podman");
             }
             FilterResult::MethodNotAllowed => {
                 writer_channel.send(close_response(NOT_ALLOWED)).await?;
-                debug!("Method not allowed");
+                log::debug!("Method not allowed");
             }
             FilterResult::Forbidden => {
                 writer_channel.send(close_response(FORBIDDEN)).await?;
-                debug!("Forbidden");
+                log::debug!("Forbidden");
             }
             FilterResult::BadRequest => {
                 writer_channel.send(close_response(BAD_REQUEST)).await?;
-                debug!("Bad request");
+                log::debug!("Bad request");
             }
         }
     }

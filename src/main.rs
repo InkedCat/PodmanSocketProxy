@@ -57,7 +57,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Proxy::Inet(args) => {
             let inet_socket = proxy::tcp::open_inet_socket(&args).await?;
 
-            info!("Listening on: {}:{}", args.ip, args.port);
+            log::info!("Listening on: {}:{}", args.ip, args.port);
             proxy::ProxyListener::Inet(inet_socket)
         }
         cli::Proxy::Unix(args) => {
@@ -74,8 +74,9 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         match listener.accept().await {
-            debug!("Accepted a client connection");
             Ok(stream) => {
+                log::debug!("Accepted a client connection");
+
                 let permit = semaphore.clone().acquire_owned().await?;
 
                 let filters_handler = filters_handler.clone();
