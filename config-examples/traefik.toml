@@ -1,23 +1,31 @@
-[get]
+
+#
+# Regex Expression recommendations:
+# - Use ^ at the start
+# - Use $ at the end
+# - Be carefull of potential arguments in URI's
+#
+
+[filters.get]
 allowed = true
 regex = '^/v1\..{1,2}/(version|containers/.*|events.*)$'
 
-[head]
-allowed = true
-regex = '^.*$'
-
-[post]
+[filters.head]
 allowed = false
-regex = '^.*$'
+regex = ''
 
-[put]
+[filters.post]
 allowed = false
-regex = '^.*$'
+regex = ''
 
-[patch]
+[filters.put]
 allowed = false
-regex = '^.*$'
+regex = ''
 
-[delete]
+[filters.patch]
 allowed = false
-regex = '^.*$'
+regex = ''
+
+[filters.delete]
+allowed = false
+regex = ''

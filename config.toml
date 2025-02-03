@@ -1,3 +1,4 @@
+
 #
 # Regex Expression recommendations:
 # - Use ^ at the start
@@ -5,26 +6,26 @@
 # - Be carefull of potential arguments in URI's
 #
 
-[get]
+[filters.get]
 allowed = false
 regex = ''
 
-[head]
+[filters.head]
 allowed = false
 regex = ''
 
-[post]
+[filters.post]
 allowed = false
 regex = ''
 
-[put]
+[filters.put]
 allowed = false
 regex = ''
 
-[patch]
+[filters.patch]
 allowed = false
 regex = ''
 
-[delete]
+[filters.delete]
 allowed = false
 regex = ''
