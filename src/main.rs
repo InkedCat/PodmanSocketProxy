@@ -8,14 +8,15 @@ mod responses;
 use crate::responses::request_response;
 use anyhow::Context;
 use errors::ConnectPodmanError;
+use log;
 use proxy::client::handle_client;
 use std::os::unix::fs::FileTypeExt;
 use std::sync::Arc;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, BufReader};
 use tokio::net::UnixStream;
-
 use tokio::sync::{mpsc, Semaphore};
+use env_logger::Env;
 
 const MAX_CONCURRENT_CONNECTIONS: usize = 10000;
 
@@ -48,6 +49,8 @@ impl PodmanSocketConnector {
 //
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+
     let args = cli::get_args();
 
     let config = config::get_config(&args.config_path)
@@ -63,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Proxy::Unix(args) => {
             let unix_socket = proxy::unix::open_unix_socket(&args).await?;
 
-            info!("Listening on: {:?}", args.socket_path);
+            log::info!("Listening on: {:?}", args.socket_path);
             proxy::ProxyListener::Unix(unix_socket)
         }
     };
@@ -77,11 +80,23 @@ async fn main() -> anyhow::Result<()> {
             Ok(stream) => {
                 log::debug!("Accepted a client connection");
 
-                let permit = semaphore.clone().acquire_owned().await?;
+                let permit = match semaphore.clone().acquire_owned().await {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        log::error!("Too many clients, client connection closed");
+                        break;
+                    }
+                };
 
                 let filters_handler = filters_handler.clone();
 
-                let podman_sock = podman_connector.connect().await?;
+                let podman_sock = match podman_connector.connect().await {
+                    Ok(sock) => sock,
+                    Err(e) => {
+                        log::error!("Failed to establish connection with the Podman API : {}", e);
+                        break;
+                    }
+                };
                 let (podman_read, podman_write) = podman_sock.into_split();
 
                 let (stream_read, mut stream_write) = stream.split();
@@ -94,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
                     if let Err(e) =
                         handle_client(stream_read, podman_write, handler_tx, filters_handler).await
                     {
-                        error!("Error occured while handling a client: {}", e);
+                        log::error!("Error occured while handling a client: {}", e);
                     }
 
                     drop(permit);
@@ -109,7 +124,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                error!("Error writing to a client: {}", e);
+                                log::error!("Error writing to a client: {}", e);
                                 break;
                             }
                         }
@@ -124,7 +139,7 @@ async fn main() -> anyhow::Result<()> {
                         let size = match podman_buffer_reader.read_buf(&mut response_buffer).await {
                             Ok(size) => size,
                             Err(e) => {
-                                error!("Error reading from the Podman socket: {}", e);
+                                log::error!("Error reading from the Podman socket: {}", e);
                                 break;
                             }
                         };
@@ -137,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
                             .send(request_response(response_buffer.clone()))
                             .await
                         {
-                            error!("Error sending response to a client: {}", e);
+                            log::error!("Error sending response to a client: {}", e);
                             break;
                         }
 
@@ -146,7 +161,7 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             Err(err) => {
-                error!("Error accepting client: {}", err);
+                log::error!("Error accepting client: {}", err);
                 break;
             }
         }
