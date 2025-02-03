@@ -57,13 +57,13 @@ async fn main() -> anyhow::Result<()> {
         cli::Proxy::Inet(args) => {
             let inet_socket = proxy::tcp::open_inet_socket(&args).await?;
 
-            println!("Listening on: {}:{}", args.ip, args.port);
+            info!("Listening on: {}:{}", args.ip, args.port);
             proxy::ProxyListener::Inet(inet_socket)
         }
         cli::Proxy::Unix(args) => {
             let unix_socket = proxy::unix::open_unix_socket(&args).await?;
 
-            println!("Listening on: {:?}", args.socket_path);
+            info!("Listening on: {:?}", args.socket_path);
             proxy::ProxyListener::Unix(unix_socket)
         }
     };
@@ -74,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
 
     loop {
         match listener.accept().await {
+            debug!("Accepted a client connection");
             Ok(stream) => {
                 let permit = semaphore.clone().acquire_owned().await?;
 
@@ -92,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
                     if let Err(e) =
                         handle_client(stream_read, podman_write, handler_tx, filters_handler).await
                     {
-                        eprintln!("Error occured while handling a client: {}", e);
+                        error!("Error occured while handling a client: {}", e);
                     }
 
                     drop(permit);
@@ -107,7 +108,7 @@ async fn main() -> anyhow::Result<()> {
                                 }
                             }
                             Err(e) => {
-                                eprintln!("Error writing to a client: {}", e);
+                                error!("Error writing to a client: {}", e);
                                 break;
                             }
                         }
@@ -122,7 +123,7 @@ async fn main() -> anyhow::Result<()> {
                         let size = match podman_buffer_reader.read_buf(&mut response_buffer).await {
                             Ok(size) => size,
                             Err(e) => {
-                                eprintln!("Error reading from the Podman socket: {}", e);
+                                error!("Error reading from the Podman socket: {}", e);
                                 break;
                             }
                         };
@@ -135,7 +136,7 @@ async fn main() -> anyhow::Result<()> {
                             .send(request_response(response_buffer.clone()))
                             .await
                         {
-                            eprintln!("Error sending response to a client: {}", e);
+                            error!("Error sending response to a client: {}", e);
                             break;
                         }
 
@@ -144,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
                 });
             }
             Err(err) => {
-                eprintln!("Error accepting client: {}", err);
+                error!("Error accepting client: {}", err);
                 break;
             }
         }
